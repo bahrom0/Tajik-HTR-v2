@@ -16,6 +16,7 @@ import { useLocale } from '@/components/app-shell';
 import { StepHeader } from '@/components/ui/step-header';
 import { Button } from '@/components/ui/button';
 import { Status } from '@/components/ui/status';
+import { SiteLoader } from '@/components/ui/site-loader';
 import { JobDto, LineResultDto, RegionDto } from '@/domain/types';
 import { LineCropPreview } from '@/components/document/line-crop-preview';
 
@@ -112,6 +113,34 @@ export default function RecognizePage() {
     }
   }, []);
 
+  const retryFailedLines = useCallback(async () => {
+    if (!job?.id) return;
+    try {
+      setIsStarting(true);
+      const response = await fetch(`/api/v1/jobs/${job.id}/retry`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.job) throw new Error(data?.error?.messageKey || 'JOB_RETRY_FAILED');
+      setJob(data.job);
+      await fetchLineResults();
+    } catch (error: any) {
+      setPageError(error.message || 'JOB_RETRY_FAILED');
+    } finally {
+      setIsStarting(false);
+    }
+  }, [fetchLineResults, job?.id]);
+
+  const cancelRecognition = useCallback(async () => {
+    if (!job?.id) return;
+    try {
+      const response = await fetch(`/api/v1/jobs/${job.id}/cancel`, { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.job) throw new Error(data?.error?.messageKey || 'JOB_CANCEL_FAILED');
+      setJob(data.job);
+    } catch (error: any) {
+      setPageError(error.message || 'JOB_CANCEL_FAILED');
+    }
+  }, [job?.id]);
+
   useEffect(() => {
     if (documentData?.page?.id && !job && !pageError && !isStarting) {
       startOrResumeJob(documentData.page.id);
@@ -134,8 +163,14 @@ export default function RecognizePage() {
         if (res.ok) {
           const data = await res.json();
           if (data.job) {
+            const hasProgressChange =
+              data.job.status !== job.status ||
+              data.job.completedCount !== job.completedCount ||
+              data.job.failedCount !== job.failedCount;
             setJob(data.job);
-            fetchLineResults();
+            if (hasProgressChange || ['succeeded', 'partial', 'failed', 'cancelled'].includes(data.job.status)) {
+              fetchLineResults();
+            }
           }
         }
       } catch {
@@ -149,13 +184,7 @@ export default function RecognizePage() {
   }, [job, fetchLineResults]);
 
   if (loading) {
-    return (
-      <div className="document-page">
-        <section className="page-width py-12">
-          <Status variant="loading">{t.common.loading}</Status>
-        </section>
-      </div>
-    );
+    return <SiteLoader />;
   }
 
   if (pageError || !documentData) {
@@ -179,6 +208,8 @@ export default function RecognizePage() {
   const progressPercent = totalLines > 0 ? Math.min(100, Math.round((processedLines / totalLines) * 100)) : 0;
   const isFinished = job && ['succeeded', 'partial'].includes(job.status);
   const isFailed = job?.status === 'failed';
+  const isCancelled = job?.status === 'cancelled';
+  const isRetryable = isFailed || job?.status === 'partial' || isCancelled;
 
   return (
     <div className="flex flex-col min-h-screen bg-background text-app-text">
@@ -201,7 +232,7 @@ export default function RecognizePage() {
                 <div className="w-10 h-10 rounded-full bg-status-success/15 text-status-success flex items-center justify-center shrink-0">
                   <CheckCircle2 className="w-5 h-5" />
                 </div>
-              ) : isFailed ? (
+              ) : isFailed || isCancelled ? (
                 <div className="w-10 h-10 rounded-full bg-status-danger/15 text-status-danger flex items-center justify-center shrink-0">
                   <AlertCircle className="w-5 h-5" />
                 </div>
@@ -211,7 +242,7 @@ export default function RecognizePage() {
                 </div>
               )}
               <div>
-                <h1 className="text-lg md:text-xl font-semibold m-0 flex items-center gap-2">
+                <h1 className={`text-lg md:text-xl font-semibold m-0 flex items-center gap-2 ${isFinished ? 'recognition-complete-title' : ''}`}>
                   <span>
                     {isFinished
                       ? job?.status === 'partial'
@@ -219,6 +250,8 @@ export default function RecognizePage() {
                         : t.document.recognizeCompleted
                       : isFailed
                       ? t.document.recognizeFailed
+                      : isCancelled
+                      ? t.document.recognizeCancelled
                       : t.document.recognizingProgress}
                   </span>
                 </h1>
@@ -233,7 +266,7 @@ export default function RecognizePage() {
               <Button
                 variant="primary"
                 size="md"
-                className="self-start sm:self-auto shrink-0 font-medium"
+                className="self-start sm:self-auto shrink-0 font-medium w-full sm:w-auto"
                 onClick={() => router.push(`/app/documents/${doc.id}/result`)}
               >
                 <span>{t.document.openResultAction}</span>
@@ -241,21 +274,22 @@ export default function RecognizePage() {
               </Button>
             )}
 
-            {isFailed && (
+            {isRetryable && (
               <Button
                 variant="outline"
                 size="md"
                 className="self-start sm:self-auto shrink-0"
-                onClick={() => page?.id && startOrResumeJob(page.id)}
+                disabled={isStarting}
+                onClick={retryFailedLines}
               >
                 <RotateCw className="w-4 h-4 mr-1.5" />
-                <span>{t.common.retry}</span>
+                <span>{isCancelled ? t.document.restartRecognition : t.document.retryFailedLines}</span>
               </Button>
             )}
           </div>
 
           {/* Progress Bar and Counters */}
-          <div className="space-y-2 pt-2 border-t border-border/60">
+          <div className="space-y-2 pt-2">
             <div className="flex items-center justify-between text-xs">
               <span className="font-mono text-app-text-secondary">
                 {completedLines} / {totalLines} {t.document.linesRecognizedCount.toLowerCase()}
@@ -274,7 +308,7 @@ export default function RecognizePage() {
 
         {/* Lines Processed List */}
         <div className="bg-surface border border-border rounded-xl p-4 md:p-6 shadow-sm flex flex-col gap-3">
-          <div className="flex items-center justify-between pb-3 border-b border-border">
+          <div className="flex flex-col sm:flex-row sm:items-center items-start justify-between gap-2 pb-3 border-b border-border">
             <div className="flex items-center gap-2">
               <Layers className="w-4 h-4 text-app-text-secondary" />
               <h2 className="text-sm font-semibold m-0">{t.document.allLines}</h2>
@@ -330,29 +364,29 @@ export default function RecognizePage() {
                             geometry={region.geometry}
                           />
                         ) : (
-                          <span className="text-[10px] text-app-text-secondary">Скан</span>
+                          <span className="text-[10px] text-app-text-secondary">{t.document.scanLabel}</span>
                         )}
                       </div>
 
                       {/* Line Text or placeholder */}
                       <div className="min-w-0 flex-1">
                         {isLineSuccess ? (
-                          <p className="text-xs md:text-sm font-medium text-app-text leading-snug m-0 break-words font-sans">
-                            {res.rawText || <span className="text-app-text-secondary italic">Пустая строка</span>}
+                          <p className="recognition-line-text-reveal text-xs md:text-sm font-medium text-app-text leading-snug m-0 break-words font-sans">
+                            {res.rawText || <span className="text-app-text-secondary italic">{t.document.emptyRecognizedLine}</span>}
                           </p>
                         ) : isLineFailed ? (
                           <p className="text-xs text-status-danger m-0">
                             {t.document.lineStatusFailed}
                           </p>
-                        ) : isLineProcessing ? (
-                          <div className="flex items-center gap-1.5 text-xs text-app-text-secondary">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>{t.document.lineStatusProcessing}</span>
-                          </div>
                         ) : (
-                          <span className="text-xs text-app-text-secondary opacity-60">
-                            {t.document.lineStatusPending}
-                          </span>
+                          <div
+                            className="recognition-line-skeleton"
+                            aria-label={isLineProcessing ? t.document.lineStatusProcessing : t.document.lineStatusPending}
+                            role="status"
+                          >
+                            <span />
+                            <span />
+                          </div>
                         )}
                       </div>
                     </div>
@@ -360,7 +394,7 @@ export default function RecognizePage() {
                     {/* Status badge */}
                     <div className="shrink-0 self-end md:self-auto">
                       {isLineSuccess ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-status-success/10 text-status-success font-medium">
+                        <span className="recognition-status-ready inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-status-success/10 text-status-success font-medium">
                           <CheckCircle2 className="w-3 h-3" />
                           {t.document.lineStatusSuccess}
                         </span>
@@ -389,19 +423,25 @@ export default function RecognizePage() {
         </div>
 
         {/* Bottom Navigation */}
-        <div className="flex items-center justify-between pt-2">
+        <div className="flex flex-col sm:flex-row sm:items-center items-stretch justify-between gap-3 pt-2">
           <Link
             href={`/app/documents/${doc.id}/lines`}
-            className="text-xs text-app-text-secondary hover:text-app-text transition-colors"
+            className="inline-flex min-h-11 items-center text-xs text-app-text-secondary hover:text-app-text transition-colors"
           >
             ← {t.document.backToLines}
           </Link>
+
+          {job && ['queued', 'running', 'cancelling'].includes(job.status) && (
+            <Button className="w-full sm:w-auto" variant="outline" size="md" onClick={cancelRecognition} disabled={job.status === 'cancelling'}>
+              {job.status === 'cancelling' ? t.document.cancellingRecognition : t.document.cancelRecognition}
+            </Button>
+          )}
 
           {isFinished && (
             <Button
               variant="primary"
               size="lg"
-              className="font-medium"
+              className="font-medium w-full sm:w-auto"
               onClick={() => router.push(`/app/documents/${doc.id}/result`)}
             >
               <span>{t.document.openResultAction}</span>
